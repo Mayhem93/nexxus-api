@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/telepat-io/telepat-api.svg?branch=develop)](https://travis-ci.org/telepat-io/telepat-api) [![Test Coverage](https://codeclimate.com/github/telepat-io/telepat-api/badges/coverage.svg)](https://codeclimate.com/github/telepat-io/telepat-api/coverage) [![Code Climate](https://codeclimate.com/github/telepat-io/telepat-api/badges/gpa.svg)](https://codeclimate.com/github/telepat-io/telepat-api) [![David](https://img.shields.io/david/telepat-io/telepat-api.svg)](https://david-dm.org/telepat-io/telepat-api)
+
 # Telepat API
 
 This is the Telepat API where all api calls are made. CRUD operations are not processed here directly. Messages are
@@ -35,4 +37,4 @@ To run just the tests using mocha (make sure you have installed globally `npm in
 **Notice**: the testing suite automatically starts the API server but **NOT** the telepat workers. You should start them
 before running the tests.
 
-API documentation can be found here: [http://docs.telepat.io/api.html](http://docs.telepat.io/api.html)
+API documentation can be found here: [http://docs.telepat.io/api-docs.html](http://docs.telepat.io/api-docs.html)

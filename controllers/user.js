@@ -10,6 +10,7 @@ var microtime = require('microtime-nodejs');
 var crypto = require('crypto');
 var guid = require('uuid');
 var mandrill = require('mandrill-api');
+var sendgridHelper = require('sendgrid').mail;
 
 var unless = function(paths, middleware) {
 	return function(req, res, next) {
@@ -27,9 +28,13 @@ var unless = function(paths, middleware) {
 	};
 };
 
-router.use(unless(['/refresh_token', '/confirm', '/request_password_reset', '/metadata', '/update_metadata'], security.deviceIdValidation));
-router.use(unless(['/refresh_token', '/confirm', '/metadata', '/update_metadata'], security.applicationIdValidation));
-router.use(unless(['/refresh_token', '/confirm', '/metadata', '/update_metadata'], security.apiKeyValidation));
+var isMobileBrowser = function(userAgent) {
+	return userAgent.match(/(iPad|iPhone|iPod|Android|Windows Phone)/g) ? true : false;
+};
+
+router.use(unless(['/refresh_token', '/confirm', '/request_password_reset', '/metadata', '/update_metadata', '/reset_password_intermediate'], security.deviceIdValidation));
+router.use(unless(['/refresh_token', '/confirm', '/metadata', '/update_metadata', '/reset_password_intermediate'], security.applicationIdValidation));
+router.use(unless(['/refresh_token', '/confirm', '/metadata', '/update_metadata', '/reset_password_intermediate'], security.apiKeyValidation));
 
 router.use(['/logout', '/me', '/update', '/update_immediate', '/delete', '/metadata', '/update_metadata'],
 	security.tokenValidation);
@@ -207,17 +212,17 @@ router.post('/login-:s', function(req, res, next) {
 	if (loginProvider == 'facebook') {
 		if (!req.body.access_token)
 			return next(new Models.TelepatError(Models.TelepatError.errors.MissingRequiredField, ['access_token']));
-		if (!app.telepatConfig.login_providers || !app.telepatConfig.login_providers.facebook)
+		if (!app.telepatConfig.config.login_providers || !app.telepatConfig.config.login_providers.facebook)
 			return next(new Models.TelepatError(Models.TelepatError.errors.ServerNotConfigured,
 				['facebook login provider']));
 		else
-			FB.options(app.telepatConfig.login_providers.facebook);
+			FB.options(app.telepatConfig.config.login_providers.facebook);
 	} else if (loginProvider == 'twitter') {
 		if (!req.body.oauth_token)
 			return next(new Models.TelepatError(Models.TelepatError.errors.MissingRequiredField, ['oauth_token']));
 		if (!req.body.oauth_token_secret)
 			return next(new Models.TelepatError(Models.TelepatError.errors.MissingRequiredField, ['oauth_token_secret']));
-		if (!app.telepatConfig.login_providers || !app.telepatConfig.login_providers.twitter)
+		if (!app.telepatConfig.config.login_providers || !app.telepatConfig.config.login_providers.twitter)
 			return next(new Models.TelepatError(Models.TelepatError.errors.ServerNotConfigured,
 				['twitter login provider']));
 	} else {
@@ -231,21 +236,14 @@ router.post('/login-:s', function(req, res, next) {
 	var deviceId = req._telepat.device_id;
 	var appId = req._telepat.applicationId;
 
-	async.waterfall([
+	async.series([
 		//Retrieve facebook information
 		function(callback) {
 			if (loginProvider == 'facebook') {
 				FB.napi('/me?fields=name,email,id,gender,picture', {access_token: accessToken}, function(err, result) {
 					if (err) return callback(err);
-
-					if (!result.email) {
-						callback(new Models.TelepatError(Models.TelepatError.errors.InsufficientFacebookPermissions,
-							'email address is missing'));
-					}
-
-					username = result.email;
+					username = result.email || result.id;
 					socialProfile = result;
-
 					callback();
 				});
 			} else if (loginProvider == 'twitter') {
@@ -254,8 +252,8 @@ router.post('/login-:s', function(req, res, next) {
 					access_token_secret: req.body.oauth_token_secret
 				};
 
-				options.consumer_key = app.telepatConfig.login_providers.twitter.consumer_key;
-				options.consumer_secret = app.telepatConfig.login_providers.twitter.consumer_secret;
+				options.consumer_key = app.telepatConfig.config.login_providers.twitter.consumer_key;
+				options.consumer_secret = app.telepatConfig.config.login_providers.twitter.consumer_secret;
 
 				var twitterClient = new Twitter(options);
 
@@ -277,20 +275,64 @@ router.post('/login-:s', function(req, res, next) {
 		},
 		function(callback) {
 			//try and get user profile from DB
-			Models.User({username: username}, appId, function(err, result) {
-				if (err && err.status == 404) {
-					callback(new Models.TelepatError(Models.TelepatError.errors.UserNotFound));
-				}
-				else if (err)
-					callback(err);
-				else {
-					userProfile = result;
-					callback();
-				}
-			});
+			if (req.body.username && loginProvider == 'facebook') {
+				async.series([
+					function(callback1) {
+						Models.User({username: username}, appId, function(err, result) {
+							if (err && err.status == 404) {
+								callback1();
+							}
+							else if (err)
+								callback1(err);
+							else if (!result.fid) {
+								callback1();
+							} else {
+								callback1(new Models.TelepatError(Models.TelepatError.errors.UserAlreadyExists));
+							}
+						});
+					},
+					function(callback1) {
+						Models.User({username: req.body.username}, appId, function(err, result) {
+							if (!err) {
+								var patches = [];
+								patches.push(Models.Delta.formPatch(result, 'replace', {username: username}));
+								patches.push(Models.Delta.formPatch(result, 'replace', {picture: socialProfile.picture.data.url}));
+								patches.push(Models.Delta.formPatch(result, 'replace', {fid: socialProfile.id}));
+								patches.push(Models.Delta.formPatch(result, 'replace', {name: socialProfile.name}));
+
+								Models.User.update(patches, function(err, modifiedUser) {
+									if (err) return callback1(err);
+									userProfile = modifiedUser;
+									callback1();
+								});
+							} else if (err && err.status != 404)
+								callback1(err);
+							else {
+								callback1(new Models.TelepatError(Models.TelepatError.errors.UserNotFound));
+							}
+						});
+					}
+				], callback);
+			} else {
+				Models.User({username: username}, appId, function(err, result) {
+					if (err && err.status == 404) {
+						callback(new Models.TelepatError(Models.TelepatError.errors.UserNotFound));
+					}
+					else if (err)
+						callback(err);
+					else {
+						userProfile = result;
+						callback();
+					}
+				});
+
+			}
 		},
 		//update user with deviceID if it already exists
 		function(callback) {
+			//if linking account with fb, user updating again is not necessary
+			if (req.body.username && loginProvider == 'facebook')
+				return callback();
 			if (userProfile.devices) {
 				var idx = userProfile.devices.indexOf(deviceId);
 				if (idx === -1)
@@ -317,23 +359,19 @@ router.post('/login-:s', function(req, res, next) {
 			}
 
 			Models.User.update(patches, callback);
-
-			//user first logged in with password then with fb
-			/*if (!userProfile.fid) {
-				var key = 'blg:'+Models.User._model.namespace+':fid:'+fbProfile.id;
-				Models.Application.bucket.insert(key, userProfile.email, function() {
-					userProfile.fid = fbProfile.id;
-					userProfile.name = fbProfile.name;
-					userProfile.gender = fbProfile.gender;
-
-					Models.User.update(userProfile.email, userProfile, callback);
-				});
-			} else {
-				callback(null, true);
-			}*/
 		}
 		//final step: send authentification token
-	], function(err, results) {
+	], function(err) {
+		if(err && err.code == '023') {
+			return next(err);
+		}
+
+		if(loginProvider == 'facebook' && err && err.response && err.response.error.code == 190) {
+			return next(new Models.TelepatError(Models.TelepatError.errors.InvalidAuthorization, ['Facebook access token has expired']));
+		}
+		if (err && err[0] && err[0].code == 89) {
+		 	return next(new Models.TelepatError(Models.TelepatError.errors.InvalidAuthorization, ['Twitter access token has expired']));
+	     }
 		if (err)
 			return next(err);
 		else {
@@ -400,17 +438,17 @@ router.post('/register-:s', function(req, res, next) {
 	if (loginProvider == 'facebook') {
 		if (!req.body.access_token)
 			return next(new Models.TelepatError(Models.TelepatError.errors.MissingRequiredField, ['access_token']));
-		if (!app.telepatConfig.login_providers || !app.telepatConfig.login_providers.facebook)
+		if (!app.telepatConfig.config.login_providers || !app.telepatConfig.config.login_providers.facebook)
 			return next(new Models.TelepatError(Models.TelepatError.errors.ServerNotConfigured,
 				['facebook login handler']));
 		else
-			FB.options(app.telepatConfig.login_providers.facebook);
+			FB.options(app.telepatConfig.config.login_providers.facebook);
 	} else if (loginProvider == 'twitter') {
 		if (!req.body.oauth_token)
 			return next(new Models.TelepatError(Models.TelepatError.errors.MissingRequiredField, ['oauth_token']));
 		if (!req.body.oauth_token_secret)
 			return next(new Models.TelepatError(Models.TelepatError.errors.MissingRequiredField, ['oauth_token_secret']));
-		if (!app.telepatConfig.login_providers || !app.telepatConfig.login_providers.twitter)
+		if (!app.telepatConfig.config.login_providers || !app.telepatConfig.config.login_providers.twitter)
 			return next(new Models.TelepatError(Models.TelepatError.errors.ServerNotConfigured,
 				['twitter login provider']));
 	} else if (loginProvider == 'username') {
@@ -428,7 +466,6 @@ router.post('/register-:s', function(req, res, next) {
 	var deviceId = req._telepat.device_id;
 	var appId = req._telepat.applicationId;
 	var requiresConfirmation = Models.Application.loadedAppModels[appId].email_confirmation;
-
 	if (loginProvider == 'username' && requiresConfirmation && !req.body.email) {
 		return next(new Models.TelepatError(Models.TelepatError.errors.MissingRequiredField, ['email']));
 	}
@@ -439,11 +476,8 @@ router.post('/register-:s', function(req, res, next) {
 		function(callback) {
 			if (loginProvider == 'facebook') {
 				FB.napi('/me?fields=name,email,id,gender,picture', {access_token: accessToken}, function(err, result) {
-					if (err) return callback(err);
-
-					if (!result.email) {
-						callback(new Models.TelepatError(Models.TelepatError.errors.InsufficientFacebookPermissions,
-							['email address is missing']));
+					if (err) {
+						return callback(err);
 					}
 
 					var picture = result.picture.data.url;
@@ -451,7 +485,7 @@ router.post('/register-:s', function(req, res, next) {
 
 					userProfile = result;
 					userProfile.picture = picture;
-					userProfile.username = result.email;
+					userProfile.username = result.email || result.id;
 
 					callback();
 				});
@@ -461,8 +495,8 @@ router.post('/register-:s', function(req, res, next) {
 					access_token_secret: req.body.oauth_token_secret
 				};
 
-				options.consumer_key = app.telepatConfig.login_providers.twitter.consumer_key;
-				options.consumer_secret = app.telepatConfig.login_providers.twitter.consumer_secret;
+				options.consumer_key = app.telepatConfig.config.login_providers.twitter.consumer_key;
+				options.consumer_secret = app.telepatConfig.config.login_providers.twitter.consumer_secret;
 
 				var twitterClient = new Twitter(options);
 
@@ -505,10 +539,10 @@ router.post('/register-:s', function(req, res, next) {
 				return callback(new Models.TelepatError(Models.TelepatError.errors.MissingRequiredField,
 					['username']));
 			}
-
 			Models.User({username: userProfile.username}, appId, function(err, result) {
+
 				if (!err) {
-					callback(new Models.TelepatError(Models.TelepatError.errors.UserAlreadyExists));
+					callback(new Models.TelepatError(Models.TelepatError.errors.UserAlreadyExists)); 
 				}
 				else if (err && err.status != 404)
 					callback(err);
@@ -541,43 +575,68 @@ router.post('/register-:s', function(req, res, next) {
 				delete userProfile.id;
 			}
 
-			if (requiresConfirmation &&
-				loginProvider == 'username' &&
-				Models.Application.loadedAppModels[appId].from_email) {
+			if (requiresConfirmation &&	loginProvider == 'username') {
+			
+				var mandrill = app.telepatConfig.config.mandrill && app.telepatConfig.config.mandrill.api_key;
+				var sendgrid = app.telepatConfig.config.sendgrid && app.telepatConfig.config.sendgrid.api_key;
 
-				if (!app.telepatConfig.mandrill || !app.telepatConfig.mandrill.api_key) {
+				if (!mandrill && !sendgrid) {
 					Models.Application.logger.warning('Mandrill API key is missing, user email address will be ' +
 						'automatically confirmed');
 					userProfile.confirmed = true;
+				} else if (!Models.Application.loadedAppModels[appId].from_email) {
+					Models.Application.logger.warning('"from_email" config missing, user email address will be ' +
+						'automatically confirmed');
+					userProfile.confirmed = true;
 				} else {
-					var mandrillClient = new mandrill.Mandrill(app.telepatConfig.mandrill.api_key);
+					var messageContent = '';
+					var emailProvider = app.telepatConfig.config.mandrill ? 'mandrill' : 'sendgrid';
+					var apiKey = {};
+					apiKey[emailProvider] = app.telepatConfig.config[emailProvider].api_key;
 
 					userProfile.confirmed = false;
 					userProfile.confirmationHash = crypto.createHash('md5').update(guid.v4()).digest('hex').toLowerCase();
 					var url = 'http://'+req.headers.host + '/user/confirm?username='+
 						encodeURIComponent(userProfile.username)+'&hash='+userProfile.confirmationHash+'&app_id='+appId;
-					var message = {
-						html: 'In order to be able to use and log in to the "'+Models.Application.loadedAppModels[appId].name+
-						'" app click this link: <a href="'+url+'">Confirm</a>',
-						subject: 'Account confirmation for "'+Models.Application.loadedAppModels[appId].name+'"',
-						from_email: Models.Application.loadedAppModels[appId].from_email,
-						from_name: Models.Application.loadedAppModels[appId].name,
-						to: [
-							{
-								email: userProfile.email,
-								type: 'to'
-							}
-						]
-					};
-					mandrillClient.messages.send({message: message, async: "async"}, function() {}, function(err) {
-						Models.Application.logger.warning('Unable to send confirmation email: ' + err.name + ' - '
-							+ err.message);
-					});
+
+					if (req.body.callbackUrl)
+						url += '&redirect_url='+encodeURIComponent(req.body.callbackUrl);
+
+					if (Models.Application.loadedAppModels[appId].email_templates &&
+						Models.Application.loadedAppModels[appId].email_templates.confirm_account) {
+
+						messageContent = Models.Application.loadedAppModels[appId].email_templates.confirm_account.
+						replace('{CONFIRM_LINK}', url);
+					} else {
+						messageContent = 'In order to be able to use and log in to the "'+Models.Application.loadedAppModels[appId].name+
+							'" app click this link: <a href="'+url+'">Confirm</a>';
+					}
+
+					if (Models.Application.loadedAppModels[appId].email_templates &&
+						Models.Application.loadedAppModels[appId].email_templates.confirm_account) {
+
+						messageContent = Models.Application.loadedAppModels[appId].email_templates.confirm_account.
+							replace(/\{CONFIRM_LINK}/g, url);
+					} else {
+						messageContent = 'In order to be able to use and log in to the "'+Models.Application.loadedAppModels[appId].name+
+							'" app click this link: <a href="'+url+'">Confirm</a>';
+					}
+
+					sendEmail(apiKey,
+						{
+							email: Models.Application.loadedAppModels[appId].from_email,
+							name: Models.Application.loadedAppModels[appId].name
+						},
+						userProfile.email,
+						'Account confirmation for "'+Models.Application.loadedAppModels[appId].name+'"',
+						messageContent
+					);
 				}
 			}
 
 			userProfile.application_id = req._telepat.applicationId;
-
+			delete userProfile.access_token;
+			delete userProfile.callbackUrl;
 			app.messagingClient.send([JSON.stringify({
 				op: 'create',
 				object: userProfile,
@@ -586,17 +645,49 @@ router.post('/register-:s', function(req, res, next) {
 			})], 'aggregation', callback);
 		}
 	], function(err) {
+		
+		if (err && err.message == 'Invalid OAuth access token.' && loginProvider == 'facebook') {
+			return next(new Models.TelepatError(Models.TelepatError.errors.ServerConfigurationFailure, 'Facebook invalid OAuth access token'));
+		}
 		if (err) return next(err);
 
 		res.status(202).json({status: 202, content: 'User created'});
 	});
 });
 
+/**
+ * @api {get} /user/confirm ConfirmEmailAddress
+ * @apiDescription Confirms the email address for the user
+ * @apiName ConfirmEmailAddress
+ * @apiGroup User
+ * @apiVersion 0.4.3
+ *
+ * @apiHeader {String} Content-type application/json
+ *
+ * @apiParam {String} username The username
+ * @apiParam {String} hash The confirmation hash
+ * @apiParam {String} app_id The application ID
+ * @apiParam {String} callbackUrl The app deeplink url to redirect the user to
+ *
+ * 	@apiSuccessExample {json} Success Response
+ * 	{
+ * 		"content": {
+ *			"id": 31,
+ *			"type": "user",
+ * 			"username": "abcd@appscend.com",
+ * 			"devices": [
+ *				"466fa519-acb4-424b-8736-fc6f35d6b6cc"
+ *			]
+ * 		}
+ * 	}
+ *
+ */
 router.get('/confirm', function(req, res, next) {
-	var username = req.query.username;
-	var hash = req.query.hash;
-	var appId = req.query.app_id;
+	var username = req.body.username;
+	var hash = req.body.hash;
+	var appId = req.body.app_id;
 	var user = null;
+	var redirectUrl = req.body.redirect_url;
 
 	async.series([
 		function(callback) {
@@ -621,7 +712,17 @@ router.get('/confirm', function(req, res, next) {
 		if (err)
 			return next(err);
 
-		res.status(200).json({status: 200, content: 'Account confirmed'});
+		if (redirectUrl && app.telepatConfig.config.redirect_url) {
+			res.redirect(app.telepatConfig.config.redirect_url+'?url='+encodeURIComponent(redirectUrl));
+			res.end();
+		} else if (Models.Application.loadedAppModels[appId].email_templates &&
+			Models.Application.loadedAppModels[appId].email_templates.after_confirm) {
+			res.status(200);
+			res.set('Content-Type', 'text/html');
+			res.send(Models.Application.loadedAppModels[appId].email_templates.after_confirm);
+		} else {
+			res.status(200).json({status: 200, content: 'Account confirmed'});
+		}
 	});
 });
 
@@ -698,7 +799,7 @@ router.get('/me', function(req, res, next) {
  *
  */
 router.get('/get', function(req, res, next) {
-	Models.User({id: req.query.user_id}, req._telepat.applicationId, function(err, result) {
+	Models.User({id: req.body.user_id}, req._telepat.applicationId, function(err, result) {
 		if (err && err.status == 404) {
 			return next(new Models.TelepatError(Models.TelepatError.errors.UserNotFound));
 		}
@@ -893,11 +994,14 @@ router.post('/update', function(req, res, next) {
 			})], 'aggregation', function(err) {
 				if (err)
 					return next(err);
-
+					
 				res.status(202).json({status: 202, content: "User updated"});
 			});
+
+
 		});
 	});
+	
 });
 
 /**
@@ -932,6 +1036,7 @@ router.delete('/delete', function(req, res, next) {
 
 		res.status(202).json({status: 202, content: "User deleted"});
 	});
+
 });
 
 /**
@@ -945,9 +1050,12 @@ router.delete('/delete', function(req, res, next) {
  * @apiHeader {String} X-BLGREQ-APPID Custom header which contains the application ID
  * @apiHeader {String} X-BLGREQ-SIGN Custom header containing the SHA256-ed API key of the application
  *
+ * @apiParam {string} link An application deep link to redirect the user when clicking the link in the email sent
+ * @apiParam {string} username The username which password we want to reset
+ *
  * @apiExample {json} Client Request
  * 	{
- * 		"type": "app",
+ * 		"link": "app://callback-url",
  * 		"username": "email@example.com"
  * 	}
  *
@@ -959,26 +1067,17 @@ router.delete('/delete', function(req, res, next) {
  *
  */
 router.post('/request_password_reset', function(req, res, next) {
-	var type = req.body.type; // either 'browser' or 'app'
+	var link = req.body.callbackUrl; // either 'browser' or 'app'
 	var appId = req._telepat.applicationId;
 	var username = req.body.username;
-	var link = null;
 	var token = crypto.createHash('md5').update(guid.v4()).digest('hex').toLowerCase();
 	var user = null;
 
-	if (!app.telepatConfig.mandrill || !app.telepatConfig.mandrill.api_key) {
-		return next(new Models.TelepatError(Models.TelepatError.errors.ServerNotConfigured, ['Mandrill API key']));
-	}
+	var mandrill = app.telepatConfig.config.mandrill && app.telepatConfig.config.mandrill.api_key;
+	var sendgrid = app.telepatConfig.config.sendgrid && app.telepatConfig.config.sendgrid.api_key;
 
-	if (type == 'browser') {
-		link = Models.Application.loadedAppModels[appId].password_reset.browser_link;
-	} else if (type == 'app') {
-		link = Models.Application.loadedAppModels[appId].password_reset.app_link;
-	}
-	else if (type == 'android') {
-		link = Models.Application.loadedAppModels[appId].password_reset.android_app_link;
-	} else {
-		return next(new Models.TelepatError(Models.TelepatError.errors.ClientBadRequest, ['invalid type']));
+	if (!mandrill && !sendgrid) {
+		return next(new Models.TelepatError(Models.TelepatError.errors.ServerNotConfigured, ['mandrill/sendgrid API keys missing']));
 	}
 
 	async.series([
@@ -992,34 +1091,36 @@ router.post('/request_password_reset', function(req, res, next) {
 
 				user = result;
 				callback();
-			})
+			});
 		},
 		function(callback) {
-			var mandrillClient = new mandrill.Mandrill(app.telepatConfig.mandrill.api_key);
+			var messageContent = '';
+			var emailProvider = app.telepatConfig.config.mandrill ? 'mandrill' : 'sendgrid';
+			var apiKey = {};
+			apiKey[emailProvider] = app.telepatConfig.config[emailProvider].api_key;
 
 			link += '?token='+token+'&user_id='+user.id;
 
-			var redirectUrl = app.telepatConfig.redirect_url+'?url='+encodeURIComponent(link);
+			var redirectUrl = 'http://'+req.headers.host+'/user/reset_password_intermediate?url='+encodeURIComponent(link)+
+				'&app_id='+appId;
 
-			var message = {
-				html: 'Password reset request from the "'+Models.Application.loadedAppModels[appId].name+
-				'" app. Click this URL to reset password: <a href="'+redirectUrl+'">Reset</a>',
-				subject: 'Reset account password for "'+username+'"',
-				from_email: Models.Application.loadedAppModels[appId].from_email,
-				from_name: Models.Application.loadedAppModels[appId].name,
-				to: [
-					{
-						email: user.email,
-						type: 'to'
-					}
-				],
-				track_clicks: false,
-				track_opens: false
-			};
-			mandrillClient.messages.send({message: message, async: "async"}, function() {}, function(err) {
-				Models.Application.logger.warning('Unable to send confirmation email: ' + err.name + ' - '
-					+ err.message);
-			});
+			if (Models.Application.loadedAppModels[appId].email_templates &&
+				Models.Application.loadedAppModels[appId].email_templates.reset_password) {
+				messageContent = Models.Application.loadedAppModels[appId].email_templates.reset_password.
+					replace(/\{CONFIRM_LINK}/g, redirectUrl);
+			} else {
+				messageContent = 'Password reset request from the "'+Models.Application.loadedAppModels[appId].name+
+				'" app. Click this URL to reset password: <a href="'+redirectUrl+'">Reset</a>';
+			}
+			sendEmail(apiKey,
+				{
+					email: Models.Application.loadedAppModels[appId].from_email,
+					name: Models.Application.loadedAppModels[appId].name
+				},
+				user.email,
+				'Reset account password for "'+username+'"',
+				messageContent
+			);
 
 			var patches = [];
 			patches.push(Models.Delta.formPatch(user, 'replace', {password_reset_token: token}));
@@ -1033,6 +1134,26 @@ router.post('/request_password_reset', function(req, res, next) {
 	});
 });
 
+router.get('/reset_password_intermediate', function(req, res, next) {
+	var appId = req.query.app_id;
+
+	if (!Models.Application.loadedAppModels[appId])
+		return next(new Models.TelepatError(Models.TelepatError.errors.ApplicationNotFound, [appId]));
+
+	if (!isMobileBrowser(req.get('User-Agent'))) {
+		if (Models.Application.loadedAppModels[appId].email_templates &&
+			Models.Application.loadedAppModels[appId].email_templates.weblink) {
+
+			res.status(200);
+			res.type('html');
+			res.send(Models.Application.loadedAppModels[appId].email_templates.weblink);
+			res.end();
+		}
+	} else {
+		res.redirect(decodeURIComponent(req.query.url));
+	}
+});
+
 /**
  * @api {delete} /user/password_reset Password Reset
  * @apiDescription Resets the password of the user based on a token
@@ -1043,6 +1164,10 @@ router.post('/request_password_reset', function(req, res, next) {
  * @apiHeader {String} Content-type application/json
  * @apiHeader {String} X-BLGREQ-APPID Custom header which contains the application ID
  * @apiHeader {String} X-BLGREQ-SIGN Custom header containing the SHA256-ed API key of the application
+ *
+ * @apiParam {String} token The token received from the query params in the app deeplink callback url
+ * @apiParam {String} user_id The user_id received from the query params in the app deeplink callback url
+ * @apiParam {String} password The new password
  *
  * @apiExample {json} Client Request
  * 	{
@@ -1179,5 +1304,53 @@ router.post('/update_metadata', function(req, res, next) {
 		res.status(200).json({status: 200, content: "Metadata updated successfully"});
 	});
 });
+
+function sendEmail(provider, from, to, subject, content) {
+	var emailService = Object.keys(provider)[0];
+	var apiKey = provider[emailService];
+
+	if (emailService == 'mandrill') {
+		var mandrillClient = new mandrill.Mandrill(apiKey);
+
+		var message = {
+			html: content,
+			subject: subject,
+			from_email: from.email,
+			from_name: from.name,
+			to: [
+				{
+					email: to,
+					type: 'to'
+				}
+			]
+		};
+		mandrillClient.messages.send({message: message, async: "async"}, function() {}, function(err) {
+			Models.Application.logger.warning('Unable to send Mandrill mail: ' + err.name + ' - '
+				+ err.message);
+		});
+	} else if (emailService == 'sendgrid') {
+		var from_email = new sendgridHelper.Email(from.email, from.name);
+		var to_email = new sendgridHelper.Email(to);
+		var mail = new sendgridHelper.Mail(from_email, subject, to_email, new sendgridHelper.Content('text/html', content));
+
+		var sg = require('sendgrid')(apiKey);
+		var req = sg.emptyRequest({
+			method: 'POST',
+			path: '/v3/mail/send',
+			body: mail.toJSON()
+		});
+
+		sg.API(req, function(err, response) {
+			if (err) {
+				Models.Application.logger.warning('Unable to send Sendgrid amail: ' + err.name + ' - '
+					+ err.message);
+			}
+			else if (response.statusCode >= 400) {
+				var error = JSON.parse(response.body);
+				Models.Application.logger.warning('Unable to send Sendgrid amail: ' + error.errors[0].message);
+			}
+		});
+	}
+}
 
 module.exports = router;

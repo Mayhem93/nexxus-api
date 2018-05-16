@@ -3,6 +3,7 @@ var router = express.Router();
 var Models = require('telepat-models');
 var uuid = require('uuid');
 var security = require('./security');
+var async = require('async');
 
 router.use(security.applicationIdValidation);
 router.use(security.apiKeyValidation);
@@ -111,7 +112,14 @@ router.post('/register', function(req, res, next) {
 				} else {
 					Models.Subscription.updateDevice(req._telepat.applicationId, result, req.body, function(err) {
 						if (err && err.status == 404) {
-							return next(new Models.TelepatError(Models.TelepatError.errors.DeviceNotFound, [result]));
+							req.body.id = uuid.v4();
+							Models.Subscription.addDevice(req.body, function (err, result) {
+								if (!err) {
+									return res.status(200).json({status: 200, content: {identifier: req.body.id}});
+								}
+
+								next(err);
+							});
 						} else if (err)
 							return next(err);
 
