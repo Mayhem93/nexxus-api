@@ -23,7 +23,7 @@
 		"mandrill-api": "1.0.45",
 		"microtime-nodejs": "1.0.0",
 		"object-sizeof": "1.0.9",
-		"redis": "2.6.2",
+		"redis": "3.1.1",
 		"telepat-models": "0.4.4",
 		"sendgrid": "4.0.2",
 		"twitter": "1.2.5",
