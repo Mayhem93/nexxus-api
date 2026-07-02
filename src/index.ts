@@ -12,7 +12,7 @@ import type { NexxusMessageQueueAdapter } from '@mayhem93/nexxus-message-queue-l
 let logger: NexxusBaseLogger<any> | undefined;
 
 (async () => {
-  const configManager = new NexxusConfigManager('./api.conf.json');
+  const configManager = new NexxusConfigManager();
 
   // Register the framework-fixed services (API + Redis are not pluggable)
   // so we can read `app.logger` / `app.database` / `app.message_queue`.
