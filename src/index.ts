@@ -41,7 +41,7 @@ let logger: NexxusBaseLogger<any> | undefined;
   logger = loggerInstance;
 
   const db    = new DbClass({ configManager, logger }) as NexxusDatabaseAdapter<any, any>;
-  const mq    = new MqClass({ configManager, logger }) as NexxusMessageQueueAdapter<any, any>;
+  const mq    = new MqClass({ configManager, logger }) as NexxusMessageQueueAdapter<any, any, any>;
   const redis = new NexxusRedis({ configManager, logger });
   const api   = new NexxusApi({ configManager, logger, database: db, messageQueue: mq, redis });
 

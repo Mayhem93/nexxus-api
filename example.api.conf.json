@@ -21,6 +21,14 @@
     "logger": "WinstonNexxusLogger",
     "database": "NexxusElasticsearchDb",
     "message_queue": "NexxusRabbitMq",
+    "management": {
+      "port": 9001,
+      "token": "test"
+    },
+    "hub": {
+      "endpoint": "http://localhost:9000",
+      "token": "test"
+    },
 		"auth": {
 			"availableStrategies": [
 				"local",

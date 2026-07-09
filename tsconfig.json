@@ -7,6 +7,8 @@
     "rootDir": "./src",
     "incremental": true,
     "noFallthroughCasesInSwitch": true,
+    "rewriteRelativeImportExtensions": true,
+    "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "sourceMap": true,
     "strict": true,
