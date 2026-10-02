@@ -1,6 +1,6 @@
 {
   "name": "nexxus-api",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Nexxus API server",
   "type": "module",
   "private": true,
@@ -26,11 +26,11 @@
   "author": "Răzvan Botea <contact@razvanbotea.me>",
   "license": "MPL-2.0",
   "dependencies": {
-    "@mayhem93/nexxus-api-lib": "0.0.8",
-    "@mayhem93/nexxus-core-lib": "0.0.7",
-    "@mayhem93/nexxus-database-lib": "0.0.8",
-    "@mayhem93/nexxus-message-queue-lib": "0.0.7",
-    "@mayhem93/nexxus-redis": "0.0.7"
+    "@mayhem93/nexxus-api-lib": "0.0.11",
+    "@mayhem93/nexxus-core-lib": "0.0.10",
+    "@mayhem93/nexxus-database-lib": "0.0.10",
+    "@mayhem93/nexxus-message-queue-lib": "0.0.9",
+    "@mayhem93/nexxus-redis": "0.0.10"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
